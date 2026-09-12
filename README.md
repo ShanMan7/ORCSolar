@@ -6,6 +6,13 @@ subcritical ORC (boiler/solar field -> turbine -> condenser -> pump), with
 an optional internal recuperator variant, and screens candidate
 working fluids and component efficiencies for thermal performance.
 
+Being extended toward a full system model: data center waste heat, a solar
+field, thermal storage, an ORC and an absorption chiller, with the ORC and
+chiller competing for the same stored heat. The ORC is working; the rest is
+scaffolded with the governing equations written into the stubs. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the layer contracts, the conventions a
+new block must follow, and what is built versus stubbed.
+
 ## Running it
 
 ```
@@ -13,8 +20,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
-This prints efficiency/work results for every case to the console and saves
-every plot as a PNG under `figures/` (created automatically).
+This walks both cycles and prints each one's state table (T, P, h, s at every
+state point) followed by its work, heat and efficiency terms.
 
 ## Structure
 
@@ -46,27 +53,29 @@ orcsolar/
 main.py                              # master script: runs every stage below, in order
 ```
 
-`main.py` runs, in order:
+The idea is that a component takes a state in and hands the next state back:
 
-1. **Baseline screening** - 4-state cycle efficiency for 6 candidate fluids
-   (MM, isopentane, heptane, toluene, n-octane, cyclopentane) at a fixed
-   turbine-inlet/condenser temperature, plus T-s diagrams for each.
-2. **Recuperated sensitivity study** - 6-state (recuperated) cycle for
-   heptane, sweeping turbine and pump isentropic efficiency.
-3. **Validation** - the recuperated-cycle model for n-heptane, compared
-   against 19 digitized points from the literature reference the original
-   notebooks call "Kashif's paper" (never fully cited in the repo).
+```python
+s1 = boiler.outlet_state(185, "HEPTANE")        # saturated vapor at 185 C
+s2, w_turbine = turbine.expand(s1, s3.P, 0.85, "HEPTANE")
+```
 
-Each cycle module exposes three functions with the same shape:
+and a cycle module is just those calls strung together in flow order. Each
+one exposes a single function:
 
-- `solve_states(...)` - the cheap core: solves every state point once, no
-  plotting or printing. Used internally by the other two.
-- `run_cycle(...)` - one detailed pass (optionally `verbose=True` to print
-  the full state/work/efficiency breakdown), with the T-s saturation dome
-  attached by default.
-- `efficiency_sweep(...)` - sweeps turbine-inlet temperature from a start
-  value up to the fluid's critical temperature, returning the
-  temperature/efficiency arrays used for the efficiency-vs-temperature plots.
+- `solve_states(T1, T_cond, fluid, ...)` - walks the cycle once and returns a
+  dict of `{"states": {...}, "w_turbine", "w_pump", "w_net", "q_in",
+  "q_out", "eta"}`. The recuperated cycle adds `"q_recuperated"`.
+
+`main.py` calls it for both cycles and prints the results. Change `FLUID`,
+`T_TURBINE_IN` or `T_CONDENSER` at the top of `main.py` to run a different
+case.
+
+Three modules are **not currently wired into `main.py`** - `plotting.py`,
+`ts_diagram.py` (saturation domes for T-s diagrams) and
+`calibration_data.py` (digitized literature data for validating the
+recuperated cycle). They still work and are kept for when those outputs are
+wanted again.
 
 ## Notes carried over from the original notebooks
 
