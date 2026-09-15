@@ -96,25 +96,37 @@ Sanity anchors worth keeping in mind:
 
 ## Status
 
-Working — reproduces the original notebooks, under test:
+Working — under test (20 tests across `tests/`):
 
 ```
 components/  boiler, turbine, condenser, pump, hxgr
              junction (split/mix), heat_exchanger, throttle
-cycles/      baseline, recuperated
+             absorber, generator, solution_pump
+cycles/      baseline, recuperated, absorption (single-effect, no SHX)
+mixtures/    lithium_bromide
 state, units, fluids, balance
 ```
+
+Run them: `python main.py` (ORC), `python run_chiller.py` (chiller + diagrams).
 
 Stubbed — signature and equations documented, body raises:
 
 ```
 components/  solar_collector, tes, data_center, heat_rejection
-             absorber, generator, solution_hx
-cycles/      absorption
-mixtures/    ammonia_water (nothing from CoolProp)
-             lithium_bromide (VLE from CoolProp; enthalpy needed)
+             solution_hx  (worth 20-30% on chiller COP)
+mixtures/    ammonia_water (CoolProp supplies nothing; needs Patek-Klomfar 1995)
 plant/       system (steady-state design point)
 ```
+
+Validation anchors already established, useful as regression targets:
+
+| Case | Result |
+|---|---|
+| ORC baseline / recuperated, heptane at 185 °C | 18.9% / 22.1% (matches notebooks) |
+| Chiller at 5/44.4/35/90 °C | x 0.550→0.600, f = 12.08 (matches textbook) |
+| Chiller at 5/40/35/90 °C | COP 0.644, 45.8% of reversible |
+| Minimum generator temperature, 40/35 °C reject | 74.5 °C |
+| All cycles | energy balance closes to ~1e-16 relative |
 
 Present but not wired into `main.py`: `plotting.py`, `ts_diagram.py`,
 `calibration_data.py`.

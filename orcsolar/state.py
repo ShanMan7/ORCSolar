@@ -46,6 +46,34 @@ class State:
 
 
 @dataclass
+class SolutionState:
+    """A state point of a binary absorbent solution (the chiller's solution loop).
+
+    T: temperature, Kelvin
+    P: pressure, Pa
+    h: specific enthalpy, J/kg
+    x: absorbent mass fraction - LiBr for LiBr-H2O, NH3 for NH3-H2O. Check the
+       mixture module's docstring, the two conventions are opposites.
+
+    Composition is a state variable here, which is the whole difference between
+    an absorption cycle and a vapor cycle: h depends on x, and the species
+    balance is an independent equation alongside the mass balance.
+
+    There is deliberately **no entropy field**. Entropy of a solution is only
+    meaningful against a datum that is consistent across concentrations, and the
+    available property models do not provide one - CoolProp's incompressible
+    LiBr puts h = s = 0 at 20 C for every concentration independently. This is
+    also why the solution loop cannot be drawn on a T-s diagram: plotting it
+    would imply a precision the properties do not have.
+    """
+
+    T: float
+    P: float
+    h: float
+    x: float
+
+
+@dataclass
 class Stream:
     """A flowing quantity of a named fluid: a ``State``, plus how much and what.
 

@@ -1,79 +1,171 @@
 """LiBr-H2O mixture properties.
 
-PARTIAL STUB. Unlike NH3-H2O, CoolProp does cover part of this pair - see the
-package docstring in ``orcsolar/mixtures/__init__.py`` for the evidence:
+Split source, for the reasons recorded in ``orcsolar/mixtures/__init__.py``:
 
-  - VLE, density, cp, viscosity: available and accurate via
-    ``'INCOMP::LiBr[x]'``. ``P_saturated`` below can wrap CoolProp directly.
-  - Enthalpy: **not usable** - CoolProp's LiBr enthalpy has no heat of
-    solution (heat of dilution comes back as ~0.4 J/kg where reality is
-    -30 to -50 kJ/kg) and sits on a different datum from ``'Water'``. So
-    ``h_liquid`` needs a real correlation: Patek & Klomfar (2006), or the
-    ASHRAE Handbook - Fundamentals formulation.
+  - ``P_saturated`` wraps CoolProp (``INCOMP::LiBr``), which reproduces the
+    Duehring chart to ~1.5%.
+  - ``h_liquid`` uses the ASHRAE correlation, because CoolProp's LiBr enthalpy
+    carries no heat of solution - and the absorber and generator balances are
+    made of precisely that term.
+  - ``cp_liquid`` wraps CoolProp, which is reliable.
 
-Conventions: ``x`` is the **mass fraction of LiBr** (the absorbent), which is
-how this pair is conventionally reported - note that is the opposite sense to
-``ammonia_water.x``, where x is the refrigerant. Keep the two straight when
-writing the shared cycle solver.
+CONCENTRATION CONVENTION: ``x`` is the mass fraction of **LiBr** (the
+absorbent), matching CoolProp's ``INCOMP::LiBr[x]`` syntax. So, in the
+terminology of the cycle diagram:
 
-CoolProp limits to respect: x in [0, 0.75], T in [273, 500] K. Practical
-gotcha - at absorber and generator conditions the loop sits *at* saturation, so
-query with ``Q=0`` rather than passing P, or a few Pa of rounding will trip
-"equations are valid for liquid phase only".
+    strong solution (rich in refrigerant, dilute in LiBr) -> LOW x   (state a)
+    weak solution  (lean in refrigerant, concentrated LiBr) -> HIGH x (state c)
 
-Characteristics that matter for the cycle: the absorbent is non-volatile, so
-the vapor is pure water and **no rectifier is needed** - x_vapor = 1 exactly.
-The costs are that the refrigerant is water, so the evaporator cannot go below
-~4 C (air conditioning, not refrigeration), and that concentrated solution
-**crystallizes** at high x and low temperature. That crystallization boundary
-is a hard operating limit and should be checked explicitly in any sweep, since
-the equations will happily return numbers well inside the forbidden region.
+Note some LiBr literature uses "strong" to mean strong *in LiBr*, i.e. the
+exact opposite. This module follows the cycle diagram's sense throughout.
+
+ENTHALPY DATUM: the ASHRAE correlation is referenced to h = 0 for saturated
+liquid water at 0 C. IAPWS (CoolProp's ``'Water'``) references h = 0 at the
+triple point, 0.01 C, where h_f = 0.0006 kJ/kg. The two agree to well under
+1 J/kg, so solution enthalpies from here and refrigerant enthalpies from
+CoolProp can be used in the same control-volume balance without correction.
+This is the key reason for not using CoolProp's own LiBr enthalpy, which sits
+on a per-concentration datum ~84 kJ/kg away from 'Water'.
 """
+
+import warnings
+
+from CoolProp.CoolProp import PropsSI
+from scipy.optimize import brentq
+
+from ..units import TK
 
 NAME = "lithium-bromide-water"
 REFRIGERANT = "Water"
 
-COOLPROP_MAX_X = 0.75  # mass fraction LiBr
-COOLPROP_T_RANGE_K = (273.0, 500.0)
+# CoolProp's INCOMP::LiBr limits, probed empirically.
+X_MAX = 0.75  # mass fraction LiBr
+T_RANGE_K = (273.0, 500.0)
+
+# ASHRAE Handbook - Fundamentals, solution enthalpy correlation.
+#   h [kJ/kg] = A(X) + B(X)*t + C(X)*t^2
+# with t in deg C and X the LiBr mass PERCENT (e.g. 60.0, not 0.60).
+# Stated validity: roughly 15-165 C and 40-70% LiBr.
+_A = (-2024.33, 163.309, -4.88161, 6.302948e-2, -2.913705e-4)
+_B = (18.2829, -1.1691757, 3.248041e-2, -4.034184e-4, 1.8520569e-6)
+_C = (-3.7008214e-2, 2.8877666e-3, -8.1313015e-5, 9.9116628e-7, -4.4441207e-9)
+
+# Outside this band the ASHRAE fit is an extrapolation.
+X_FIT_RANGE = (0.40, 0.70)
+T_FIT_RANGE_C = (15.0, 165.0)
+
+# Crystallization guard. The real solubility boundary is a curve in (T, x);
+# this is a flat conservative threshold, NOT a correlation - see
+# `check_crystallization`.
+X_CRYSTALLIZATION_WARN = 0.65
 
 
-def x_saturated(T_celsius, P):
-    """Equilibrium LiBr mass fraction at (T, P). Invert ``P_saturated``
-    numerically - it is monotonic, so ``scipy.optimize.brentq`` is enough.
-    CoolProp does not support the reverse direction directly ("This pair of
-    inputs [PQ_INPUTS] is not yet supported")."""
-    raise NotImplementedError("LiBr x_saturated not implemented - invert P_saturated.")
+def _poly(coeffs, X_percent):
+    return sum(c * X_percent**n for n, c in enumerate(coeffs))
+
+
+def h_liquid(T_celsius, x):
+    """Solution specific enthalpy, J/kg, on the ASHRAE datum.
+
+    Includes the heat of solution, which is the whole point - a correlation
+    without it makes the absorber and generator balances meaningless.
+    """
+    X = x * 100.0
+    h_kJ = _poly(_A, X) + _poly(_B, X) * T_celsius + _poly(_C, X) * T_celsius**2
+    return h_kJ * 1000.0
 
 
 def P_saturated(T_celsius, x):
     """Equilibrium water-vapor pressure over the solution, Pa.
 
-    Can wrap CoolProp directly - this is the part that works:
-        PropsSI('P', 'T', TK(T_celsius), 'Q', 0, f'INCOMP::LiBr[{x}]')
+    Wraps CoolProp, which handles this well. Queried at Q=0 rather than by
+    pressure: at absorber and generator conditions the loop sits *at*
+    saturation, so a pressure input trips "equations are valid for liquid
+    phase only" on a few Pa of rounding.
     """
-    raise NotImplementedError("LiBr P_saturated not implemented - wrap CoolProp INCOMP::LiBr.")
+    if not 0.0 <= x <= X_MAX:
+        raise ValueError(f"LiBr mass fraction {x:.4f} outside CoolProp range [0, {X_MAX}]")
+    return PropsSI("P", "T", TK(T_celsius), "Q", 0, f"INCOMP::LiBr[{x}]")
 
 
-def h_liquid(T_celsius, x):
-    """Solution specific enthalpy, J/kg.
+def x_saturated(T_celsius, P):
+    """Equilibrium LiBr mass fraction at (T, P), by inverting ``P_saturated``.
 
-    Do NOT wrap CoolProp here - its LiBr enthalpy omits the heat of solution,
-    which is the term the absorber and generator balances are made of. Use
-    Patek-Klomfar (2006) or ASHRAE, and state the datum explicitly.
+    Vapor pressure falls monotonically as LiBr concentration rises, so a
+    bracketed root-find is safe. CoolProp cannot do this direction itself
+    ("This pair of inputs [PQ_INPUTS] is not yet supported").
     """
-    raise NotImplementedError("LiBr h_liquid not implemented (Patek-Klomfar 2006 / ASHRAE).")
+    P_pure_water = P_saturated(T_celsius, 0.0)
+    P_most_concentrated = P_saturated(T_celsius, X_MAX)
+
+    if P > P_pure_water:
+        raise ValueError(
+            f"no solution: {P:.1f} Pa exceeds pure-water saturation pressure "
+            f"{P_pure_water:.1f} Pa at {T_celsius:.1f} C. Physically this means the "
+            "absorber/generator temperature is too high for this pressure level."
+        )
+    if P < P_most_concentrated:
+        raise ValueError(
+            f"no solution: {P:.1f} Pa is below the vapor pressure "
+            f"{P_most_concentrated:.1f} Pa of the most concentrated solution CoolProp "
+            f"models (x={X_MAX}) at {T_celsius:.1f} C."
+        )
+
+    return brentq(lambda x: P_saturated(T_celsius, x) - P, 0.0, X_MAX, xtol=1e-10)
 
 
 def cp_liquid(T_celsius, x):
-    """Solution specific heat, J/kg-K. CoolProp's value is usable."""
-    raise NotImplementedError("LiBr cp_liquid not implemented - can wrap CoolProp.")
+    """Solution specific heat, J/kg-K. CoolProp's value is reliable here."""
+    return PropsSI("C", "T", TK(T_celsius), "Q", 0, f"INCOMP::LiBr[{x}]")
 
 
-def crystallization_x(T_celsius):
-    """Maximum LiBr mass fraction before crystallization at this temperature.
+def rho_liquid(T_celsius, x):
+    """Solution density, kg/m^3. Used for the pump's v*dP work term."""
+    return PropsSI("D", "T", TK(T_celsius), "Q", 0, f"INCOMP::LiBr[{x}]")
 
-    A hard operating boundary with no thermodynamic warning attached - the
-    property correlations return perfectly reasonable-looking values past it.
-    Worth implementing alongside the rest so sweeps can be masked.
+
+def check_crystallization(T_celsius, x, label="solution"):
+    """Warn if the solution is near the crystallization boundary.
+
+    This is a **flat threshold, not a solubility correlation** - the true
+    boundary is a curve in (T, x) and depends strongly on temperature. It is
+    here because the property correlations return perfectly reasonable-looking
+    numbers deep inside the forbidden region, so a sweep will silently report
+    performance for a machine that has solidified. Replace with a real
+    solubility curve before trusting any result near the limit.
     """
-    raise NotImplementedError("LiBr crystallization limit not implemented.")
+    if x > X_CRYSTALLIZATION_WARN:
+        warnings.warn(
+            f"{label}: LiBr mass fraction {x:.3f} at {T_celsius:.1f} C is above the "
+            f"conservative crystallization threshold of {X_CRYSTALLIZATION_WARN}. "
+            "This is a flat guard, not a real solubility curve - verify against one.",
+            stacklevel=2,
+        )
+
+
+def check_fit_range(T_celsius, x, label="solution"):
+    """Warn when the ASHRAE enthalpy fit is being extrapolated."""
+    if not X_FIT_RANGE[0] <= x <= X_FIT_RANGE[1]:
+        warnings.warn(
+            f"{label}: x={x:.3f} outside the ASHRAE enthalpy fit range {X_FIT_RANGE}; "
+            "h_liquid is extrapolating.",
+            stacklevel=2,
+        )
+    if not T_FIT_RANGE_C[0] <= T_celsius <= T_FIT_RANGE_C[1]:
+        warnings.warn(
+            f"{label}: T={T_celsius:.1f} C outside the ASHRAE enthalpy fit range "
+            f"{T_FIT_RANGE_C}; h_liquid is extrapolating.",
+            stacklevel=2,
+        )
+
+
+def T_from_h(h, x, T_bounds_celsius=(0.0, 200.0)):
+    """Invert ``h_liquid`` for temperature at fixed concentration, deg C.
+
+    Needed downstream of the pump and the solution valve, where enthalpy is
+    what the energy balance gives you and temperature is what you want to
+    report. Enthalpy rises monotonically with temperature at fixed x, so a
+    bracketed root-find is safe.
+    """
+    lo, hi = T_bounds_celsius
+    return brentq(lambda T: h_liquid(T, x) - h, lo, hi, xtol=1e-9)

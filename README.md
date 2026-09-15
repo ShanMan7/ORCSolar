@@ -17,7 +17,14 @@ new block must follow, and what is built versus stubbed.
 
 ```
 pip install -r requirements.txt
-python main.py
+python main.py          # the ORC - state tables for both cycles
+python run_chiller.py   # the absorption chiller - state table + T-s + Duehring plots
+```
+
+The chiller takes its four defining temperatures on the command line:
+
+```
+python run_chiller.py --t-evap 5 --t-cond 40 --t-abs 35 --t-gen 90
 ```
 
 This walks both cycles and prints each one's state table (T, P, h, s at every
